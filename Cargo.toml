@@ -101,7 +101,7 @@ similar-asserts = "2.0.0"
 
 [build-dependencies]
 anyhow = "1.0"
-system-deps = "7.0"
+system-deps = "9.0"
 
 [lib]
 name = "rpmostree_rust"
