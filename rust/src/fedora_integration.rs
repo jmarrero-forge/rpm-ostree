@@ -92,10 +92,47 @@ mod koji {
     use super::*;
     use anyhow::anyhow;
     use std::collections::BTreeMap;
+    use std::sync::LazyLock;
     use xmlrpc::{Request, Value};
 
     const KOJI_HUB: &str = "https://koji.fedoraproject.org/kojihub/";
     const TOPURL: &str = "https://kojipkgs.fedoraproject.org/";
+
+    /// Shared by all koji calls so connections can be reused.
+    static KOJI_CLIENT: LazyLock<reqwest::blocking::Client> =
+        LazyLock::new(reqwest::blocking::Client::new);
+
+    /// xmlrpc's built-in HTTP transport is tied to reqwest 0.11, whose h2 0.3
+    /// has RUSTSEC-2026-0258 and no fix, so POST via our own reqwest instead.
+    /// Like the original this sets the XML content type, fails on HTTP error
+    /// statuses and keeps reqwest's default timeout.
+    ///
+    /// TODO: drop this once xmlrpc moves off reqwest 0.11.
+    struct KojiTransport;
+
+    impl xmlrpc::Transport for KojiTransport {
+        type Stream = reqwest::blocking::Response;
+
+        fn transmit(
+            self,
+            request: &Request<'_>,
+        ) -> std::result::Result<Self::Stream, Box<dyn std::error::Error + Send + Sync>> {
+            let mut body = Vec::new();
+            request.write_as_xml(&mut body)?;
+            let response = KOJI_CLIENT
+                .post(KOJI_HUB)
+                .header(reqwest::header::USER_AGENT, "rpm-ostree")
+                .header(reqwest::header::CONTENT_TYPE, "text/xml; charset=utf-8")
+                .body(body)
+                .send()?
+                .error_for_status()?;
+            Ok(response)
+        }
+    }
+
+    fn call_koji(req: &Request<'_>) -> Result<Value> {
+        Ok(req.call(KojiTransport)?)
+    }
 
     pub(crate) fn get_buildid_from_url(url: &str) -> Result<i64> {
         let id = url.rsplit('?').next().expect("split");
@@ -142,7 +179,7 @@ mod koji {
             BuildReference::Id(id) => Request::new("getBuild").arg(*id),
             BuildReference::Nvr(nvr) => Request::new("getBuild").arg(nvr.as_str()),
         };
-        let res = req.call_url(KOJI_HUB).context("Invoking koji getBuild()")?;
+        let res = call_koji(&req).context("Invoking koji getBuild()")?;
         let res = res
             .as_struct()
             .ok_or_else(|| anyhow!("Expected struct from getBuild"))?;
@@ -157,8 +194,7 @@ mod koji {
         let req = Request::new("listRPMs").arg(buildid);
         let arches = &[target_arch, "noarch"];
         let mut ret = Vec::new();
-        for build in req
-            .call_url(KOJI_HUB)
+        for build in call_koji(&req)
             .context("Invoking koji listRPMs")?
             .as_array()
             .ok_or_else(|| anyhow!("Expected array from listRPMs"))?
