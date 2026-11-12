@@ -10,6 +10,15 @@ cp target/release/rpm-ostree /rpm-ostree
 ENDF
 
 FROM quay.io/containers/buildah:latest
+# Since 1.44, `buildah build` mounts an overlay over the build context. In this
+# unprivileged container only fuse-overlayfs can do that, so set mount_program
+# ourselves instead of relying on the image's own storage drop-in, which had it
+# in the wrong table for two days:
+# https://github.com/podman-container-tools/image_build/issues/70
+COPY <<EOF /etc/containers/storage.conf.d/50-fuse-overlayfs.conf
+[storage.options.overlay]
+mount_program = "/usr/bin/fuse-overlayfs"
+EOF
 RUN dnf -y install rpm-ostree && rpm -e rpm-ostree
 COPY --from=builder /rpm-ostree /usr/bin/rpm-ostree
 COPY tests/build-chunked-oci/test-buildah.sh /test-buildah.sh
